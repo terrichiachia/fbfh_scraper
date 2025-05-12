@@ -1,0 +1,3 @@
+# 不要把這些東西放到 Git 裡
+downloads/
+*.ipynb

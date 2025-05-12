@@ -1,0 +1,40 @@
+version: '3'
+
+services:
+  postgres:
+    image: postgres:13
+    container_name: postgres
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=1234 # 請更改為你的密碼
+      - POSTGRES_DB=company_data
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - app-network
+
+  scraper:
+    build: .
+    container_name: scraper
+    environment:
+      - POSTGRES_HOST=postgres # 與服務名稱一致
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=company_data
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=1234 # 請更改為你的密碼
+    volumes:
+      - ./downloads:/app/downloads
+    depends_on:
+      - postgres
+    networks:
+      - app-network
+
+volumes:
+  pgdata:
+
+
+networks:
+  app-network:
+    driver: bridge
