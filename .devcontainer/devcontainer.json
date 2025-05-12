@@ -1,0 +1,69 @@
+{
+    "name": "Python Development with Jupyter",
+    "build": {
+        "context": "..",
+        "dockerfile": "../Dockerfile"
+    },
+    "features": {
+        "ghcr.io/devcontainers/features/github-cli:1": {},
+        "ghcr.io/itsmechlark/features/postgresql:1": {
+            "version": "14",
+            "username": "postgres",
+            "password": "postgres",
+            "database": "company_data"
+        }
+    },
+    // 優化 Windows 的文件掛載性能
+    "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+    "workspaceFolder": "/workspace",
+    "forwardPorts": [
+        8000,
+        8080,
+        5432,
+        8888
+    ],
+    "postCreateCommand": "pip install --upgrade pip wheel setuptools jupyter jupyterlab ipykernel ipywidgets matplotlib pandas numpy && pip install -r requirements.txt",
+    "customizations": {
+        "vscode": {
+            "settings": {
+                "python.defaultInterpreterPath": "/usr/local/bin/python",
+                "python.formatting.provider": "black",
+                "editor.formatOnSave": true,
+                "python.linting.enabled": true,
+                "python.linting.pylintEnabled": true,
+                "python.analysis.typeCheckingMode": "basic",
+                "jupyter.alwaysTrustNotebooks": true,
+                "terminal.integrated.defaultProfile.linux": "bash"
+            },
+            "extensions": [
+                "ms-python.python",
+                "ms-python.vscode-pylance",
+                "ms-python.black-formatter",
+                "ms-azuretools.vscode-docker",
+                "ms-toolsai.jupyter",
+                "ms-toolsai.jupyter-keymap",
+                "ms-toolsai.jupyter-renderers",
+                "ms-toolsai.vscode-jupyter-slideshow"
+            ]
+        }
+    },
+    "remoteEnv": {
+        "PG_HOST": "localhost",
+        "PG_PORT": "5432",
+        "PG_USER": "postgres",
+        "PG_PASSWORD": "postgres",
+        "PG_DATABASE": "company_data",
+        "DATABASE_URL": "postgresql://postgres:postgres@localhost:5432/company_data",
+        "PYTHONPATH": "/workspace",
+        "PYTHONUNBUFFERED": "1",
+        "TESSDATA_PREFIX": "/usr/share/tesseract-ocr/4.0/tessdata"
+    },
+    "runArgs": [
+        "--shm-size=2g",
+        "--memory=4g"
+    ],
+    // 將本地 downloads 目錄掛載到容器
+    "mounts": [
+        "source=${localWorkspaceFolder}/downloads,target=/workspace/downloads,type=bind,consistency=cached"
+    ]
+}
