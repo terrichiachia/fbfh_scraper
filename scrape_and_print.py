@@ -32,27 +32,14 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-# 台灣知名公司統編列表 (包含一個錯誤的統編)
-COMPANY_IDS = [
-    "22099131",  # 台積電
-    "04595600",  # 中油
-    "84149786",  # 中華電信
-    "86517384",  # 富邦金控
-    "12345678",  # 錯誤的統編
-    "04793480",  # 統一超商
-    "23757560",  # 全家便利商店
-    "11111111",  # 錯誤的統編
-    "06501701",  # 遠東百貨
-    "83007252",  # 台北捷運
-]
 
 # PostgreSQL 連接設定
 PG_CONFIG = {
-    "host": "localhost",
-    "port": 5432,
-    "database": "company_data",
-    "user": "postgres",
-    "password": "postgres",
+    "host": os.environ.get("POSTGRES_HOST", "postgres"),
+    "port": int(os.environ.get("POSTGRES_PORT", "5432")),
+    "database": os.environ.get("POSTGRES_DB", "company_data"),
+    "user": os.environ.get("POSTGRES_USER", "postgres"),
+    "password": os.environ.get("POSTGRES_PASSWORD", "1234"),
 }
 
 
@@ -130,7 +117,7 @@ def preprocess_captcha(img: Image.Image) -> Image.Image:
 
 
 def recognize_captcha(img: Image.Image, max_attempts=3) -> str:
-    """嘗試辨識驗證碼，失敗後會進行多次嘗試"""
+    """嘗試辨識驗證碼，失敗後會進行多次嘗試，支持3位數或4位數驗證碼"""
     ocr = ddddocr.DdddOcr(show_ad=False)
 
     for attempt in range(max_attempts):
@@ -139,8 +126,9 @@ def recognize_captcha(img: Image.Image, max_attempts=3) -> str:
             img.save(buf, format="PNG")
             res = "".join(filter(str.isdigit, ocr.classification(buf.getvalue())))
 
-            if len(res) >= 4:
-                return res[:4]
+            # 如果辨識結果為3位或4位數字，直接使用
+            if len(res) >= 3:
+                return res[:4]  # 如果超過4位，取前4位
 
             # 如果第一次識別結果不夠，嘗試預處理後再試
             proc = preprocess_captcha(img)
@@ -148,17 +136,24 @@ def recognize_captcha(img: Image.Image, max_attempts=3) -> str:
             proc.save(buf2, format="PNG")
             res2 = "".join(filter(str.isdigit, ocr.classification(buf2.getvalue())))
 
-            if len(res2) >= 4:
-                return res2[:4]
+            # 如果預處理後的結果為3位或4位數字，使用該結果
+            if len(res2) >= 3:
+                return res2[:4]  # 如果超過4位，取前4位
 
-            # 如果都不夠4位數，補0
-            return (res2 or res)[:4].ljust(4, "0")
+            # 如果兩次嘗試都不足3位數，使用較長的結果
+            result = res2 if len(res2) > len(res) else res
+            
+            # 如果結果不足3位，補0到3位
+            if len(result) < 3:
+                return result.ljust(3, "0")
+            else:
+                return result
+                
         except Exception as e:
             logging.warning(f"驗證碼識別第 {attempt+1} 次失敗：{e}")
             if attempt == max_attempts - 1:
-                return "0000"  # 最後一次嘗試失敗，返回默認值
+                return "000"  # 最後一次嘗試失敗，返回默認為3位數的值
             time.sleep(1)  # 暫停後再試
-
 
 def setup_driver(download_dir: str, headless=True):
     """設置並返回 Selenium WebDriver"""
@@ -172,6 +167,10 @@ def setup_driver(download_dir: str, headless=True):
             "--window-size=1920,1080",
         ]:
             opts.add_argument(flag)
+    
+    # 添加代理設定（如果需要）
+    # opts.add_argument('--proxy-server=http://your-proxy:port')
+    
     download_dir = os.path.abspath(download_dir)
     prefs = {
         "download.default_directory": download_dir,
@@ -180,20 +179,29 @@ def setup_driver(download_dir: str, headless=True):
     opts.add_experimental_option("prefs", prefs)
 
     try:
-        # 嘗試多個可能的 chromedriver 路徑
-        for path in ["/usr/local/bin/chromedriver", "/usr/bin/chromedriver"]:
-            if os.path.exists(path):
-                service = Service(path)
+        # 在Docker中使用內建Chrome瀏覽器
+        logging.info("嘗試直接使用Docker中的Chrome瀏覽器...")
+        
+        # 檢查Docker中的Chrome路徑
+        chrome_paths = [
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable"
+        ]
+        
+        for chrome_path in chrome_paths:
+            if os.path.exists(chrome_path):
+                logging.info(f"使用Chrome路徑: {chrome_path}")
+                opts.binary_location = chrome_path
                 break
-        else:
-            service = Service(ChromeDriverManager().install())
-
-        driver = webdriver.Chrome(service=service, options=opts)
-        driver.set_page_load_timeout(30)  # 設置頁面加載超時
+                
+        # 不使用Service類別，直接創建ChromeDriver
+        driver = webdriver.Chrome(options=opts)
+        driver.set_page_load_timeout(30)
         return driver
+        
     except Exception as e:
-        logging.error(f"初始化 WebDriver 時發生錯誤：{e}")
-        raise
+        logging.error(f"初始化Chrome WebDriver失敗：{e}")
+        
 
 
 def save_html_to_pdf(driver, html_content, output_path, title):
@@ -427,48 +435,16 @@ def fetch_grade_separately(company_id: str, download_dir: str) -> list:
         time.sleep(2)
 
         # 填寫統一編號
-        driver2.find_element(By.ID, "q_BanNo").send_keys(company_id)
+        id_input = WebDriverWait(driver2, 10).until(
+            EC.element_to_be_clickable((By.ID, "q_BanNo"))
+        )
+        id_input.clear()
+        id_input.send_keys(company_id)
 
         # 處理驗證碼
-        max_captcha_attempts = 3
-        for attempt in range(max_captcha_attempts):
-            try:
-                pic = driver2.find_element(By.ID, "realPic")
-                img = Image.open(io.BytesIO(pic.screenshot_as_png))
-                code = recognize_captcha(img)
-                logging.info(f"辨識的驗證碼：{code}")
-
-                inp = driver2.find_element(By.ID, "verifyCode")
-                inp.clear()
-                inp.send_keys(code)
-
-                # 點擊查詢
-                driver2.find_element(By.NAME, "querySubmit").click()
-
-                # 等待結果
-                if WebDriverWait(driver2, 10).until(
-                    EC.presence_of_element_located((By.ID, "listContainer"))
-                ):
-                    logging.info("✅ 第二隻 driver 已提交查詢並獲得結果")
-                    break
-            except Exception as e:
-                if attempt < max_captcha_attempts - 1:
-                    logging.warning(f"驗證碼嘗試 {attempt+1} 失敗：{e}")
-                    # 刷新驗證碼
-                    try:
-                        driver2.find_element(
-                            By.XPATH, "//img[@alt='驗證碼更新']"
-                        ).click()
-                        time.sleep(1)
-                    except:
-                        logging.warning("無法刷新驗證碼，將重新載入頁面")
-                        driver2.refresh()
-                        time.sleep(2)
-                else:
-                    logging.error(
-                        f"驗證碼嘗試達到上限 ({max_captcha_attempts} 次)：{e}"
-                    )
-                    return []
+        if not handle_captcha(driver2, "verifyCode", "realPic", "querySubmit"):
+            logging.error(f"[fetch_grade] 驗證碼處理失敗")
+            return []
 
         # 點擊級距按鈕
         if not click_grade_button(driver2, company_id):
@@ -615,6 +591,11 @@ def log_error_to_db(conn, company_id, error_message, stack_trace=""):
         return
 
     try:
+        # 檢查統一編號長度，截斷如果過長
+        if len(company_id) > 10:
+            logging.warning(f"統一編號 '{company_id}' 過長，將被截斷")
+            company_id = company_id[:10]
+            
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO scraping_errors (company_id, error_message, stack_trace) VALUES (%s, %s, %s)",
@@ -633,10 +614,103 @@ def log_error_to_db(conn, company_id, error_message, stack_trace=""):
         if conn:
             conn.rollback()
 
+def handle_captcha(driver, input_id, captcha_id, submit_name, cid=None, max_attempts=3):
+    """處理驗證碼識別與提交，支持3位數或4位數驗證碼
+    
+    參數:
+        driver: Selenium WebDriver 實例
+        input_id: 驗證碼輸入欄位的 ID
+        captcha_id: 驗證碼圖片的 ID
+        submit_name: 提交按鈕的 name 屬性
+        cid: 公司統一編號 (可選，用於重新填寫)
+        max_attempts: 最大嘗試次數
+    """
+    for attempt in range(max_attempts):
+        try:
+            # 截取驗證碼
+            pic = driver.find_element(By.ID, captcha_id)
+            img = Image.open(io.BytesIO(pic.screenshot_as_png))
+            code = recognize_captcha(img)
+            logging.info(f"辨識的驗證碼（第 {attempt+1} 次）：{code}")
 
-def extract_company_data(
-    cid: str, download_dir: str = "downloads", save_to_db: bool = True
-):
+            # 輸入驗證碼
+            inp = driver.find_element(By.ID, input_id)
+            inp.clear()
+            inp.send_keys(code)
+
+            # 點擊查詢
+            driver.find_element(By.NAME, submit_name).click()
+
+            # 檢查結果
+            try:
+                # 檢查是否有錯誤訊息
+                error_present = False
+                try:
+                    error_elem = WebDriverWait(driver, 5).until(
+                        EC.presence_of_element_located(
+                            (By.XPATH, "//div[contains(@class, 'alert-danger')]")
+                        )
+                    )
+                    error_text = error_elem.text
+                    error_present = True
+                    logging.warning(f"查詢錯誤：{error_text}")
+                    
+                    # 如果錯誤是查無資料，直接返回
+                    if "查無資料" in error_text:
+                        return False
+                    
+                except TimeoutException:
+                    pass
+
+                # 沒有錯誤訊息，檢查是否有結果
+                if not error_present:
+                    WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.ID, "listContainer"))
+                    )
+                    logging.info("✅ 驗證碼認證成功，已獲得查詢結果")
+                    return True
+            except TimeoutException:
+                logging.warning("未找到結果容器，可能驗證碼錯誤")
+
+            # 驗證碼可能錯誤，刷新整個頁面
+            driver.refresh()
+            time.sleep(2)
+            
+            # 重新填寫統一編號 (如果有提供)
+            if cid:
+                try:
+                    id_input = WebDriverWait(driver, 5).until(
+                        EC.element_to_be_clickable((By.ID, "q_BanNo"))
+                    )
+                    id_input.clear()
+                    id_input.send_keys(cid)
+                except:
+                    logging.warning("重新填寫統一編號失敗")
+
+        except Exception as e:
+            if attempt < max_attempts - 1:
+                logging.warning(f"驗證碼嘗試 {attempt+1} 失敗：{e}")
+                # 刷新整個頁面
+                driver.refresh()
+                time.sleep(2)
+                
+                # 重新填寫統一編號 (如果有提供)
+                if cid:
+                    try:
+                        id_input = WebDriverWait(driver, 5).until(
+                            EC.element_to_be_clickable((By.ID, "q_BanNo"))
+                        )
+                        id_input.clear()
+                        id_input.send_keys(cid)
+                    except:
+                        logging.warning("重新填寫統一編號失敗")
+            else:
+                logging.error(f"驗證碼嘗試達到上限 ({max_attempts} 次)")
+                return False
+    
+    return False
+
+def extract_company_data(cid: str, download_dir: str = "downloads", save_to_db: bool = True):
     """處理單個公司資料的主函數"""
     os.makedirs(download_dir, exist_ok=True)
     conn = connect_to_postgres() if save_to_db else None
@@ -654,83 +728,40 @@ def extract_company_data(
         driver = setup_driver(download_dir)
 
         # --- 驗證碼 + 查詢 + 取基本資料 ---
-        driver.get("https://fbfh.trade.gov.tw/fb/web/queryBasicf.do")
-        time.sleep(2)
-
-        # 填寫統一編號
-        id_input = driver.find_element(By.ID, "q_BanNo")
-        id_input.clear()
-        id_input.send_keys(cid)
-
-        # 處理驗證碼
-        max_captcha_attempts = 3
-        captcha_success = False
-
-        for attempt in range(max_captcha_attempts):
+        success = False
+        max_page_attempts = 3
+        
+        for page_attempt in range(max_page_attempts):
             try:
-                pic = driver.find_element(By.ID, "realPic")
-                img = Image.open(io.BytesIO(pic.screenshot_as_png))
-                code = recognize_captcha(img)
-                logging.info(f"辨識的驗證碼（第 {attempt+1} 次）：{code}")
+                # 訪問查詢頁面
+                driver.get("https://fbfh.trade.gov.tw/fb/web/queryBasicf.do")
+                time.sleep(2)
 
-                inp = driver.find_element(By.ID, "verifyCode")
-                inp.clear()
-                inp.send_keys(code)
-
-                # 點擊查詢
-                driver.find_element(By.NAME, "querySubmit").click()
-
-                # 檢查是否有結果
-                try:
-                    # 檢查是否有錯誤訊息
-                    error_elem = WebDriverWait(driver, 5).until(
-                        EC.presence_of_element_located(
-                            (By.XPATH, "//div[contains(@class, 'alert-danger')]")
-                        )
-                    )
-                    error_text = error_elem.text
-                    if "查無資料" in error_text or "不正確" in error_text:
-                        logging.warning(f"查詢錯誤：{error_text}")
-                        error_message = error_text
-                        error_occurred = True
-                        break
-                except TimeoutException:
-                    # 沒有錯誤訊息，檢查是否有結果
-                    try:
-                        WebDriverWait(driver, 10).until(
-                            EC.presence_of_element_located((By.ID, "listContainer"))
-                        )
-                        captcha_success = True
-                        logging.info("✅ 驗證碼認證成功，已獲得查詢結果")
-                        break
-                    except TimeoutException:
-                        logging.warning("未找到結果容器，可能驗證碼錯誤")
-
+                # 填寫統一編號
+                id_input = WebDriverWait(driver, 10).until(
+                    EC.element_to_be_clickable((By.ID, "q_BanNo"))
+                )
+                id_input.clear()
+                id_input.send_keys(cid)
+                
+                # 處理驗證碼
+                if handle_captcha(driver, "verifyCode", "realPic", "querySubmit"):
+                    success = True
+                    break
+                
             except Exception as e:
-                if attempt < max_captcha_attempts - 1:
-                    logging.warning(f"驗證碼嘗試 {attempt+1} 失敗：{e}")
-                    # 嘗試刷新驗證碼
-                    try:
-                        driver.find_element(
-                            By.XPATH, "//img[@alt='驗證碼更新']"
-                        ).click()
-                        time.sleep(1)
-                    except:
-                        driver.refresh()
-                        time.sleep(2)
-                        id_input = driver.find_element(By.ID, "q_BanNo")
-                        id_input.clear()
-                        id_input.send_keys(cid)
+                if page_attempt < max_page_attempts - 1:
+                    logging.warning(f"頁面處理第 {page_attempt+1} 次失敗：{e}，將重試")
+                    time.sleep(3)
                 else:
-                    logging.error(f"驗證碼嘗試達到上限 ({max_captcha_attempts} 次)")
-                    error_message = f"驗證碼識別失敗：嘗試 {max_captcha_attempts} 次"
+                    logging.error(f"頁面處理達到最大嘗試次數：{e}")
+                    error_message = f"無法成功提交查詢：{str(e)}"
                     error_occurred = True
 
-        # 如果驗證碼未成功，跳過後續步驟
-        if not captcha_success and error_occurred:
+        if not success:
             if conn:
-                log_error_to_db(conn, cid, error_message)
-            logging.error(f"無法繼續爬取公司 {cid} 的資料：{error_message}")
+                log_error_to_db(conn, cid, "驗證碼處理失敗或查詢無結果")
+            logging.error(f"無法繼續爬取公司 {cid} 的資料：驗證碼處理失敗")
             return
 
         # 點擊基本資料按鈕
@@ -840,27 +871,6 @@ def batch_process(company_ids, download_dir="downloads", save_to_db=True):
     )
 
 
-def verify_company_id(company_id):
-    """驗證統一編號是否符合台灣統一編號規則"""
-    # 檢查基本條件
-    if not company_id or not company_id.isdigit() or len(company_id) != 8:
-        return False
-
-    # 統一編號驗證規則
-    weights = [1, 2, 1, 2, 1, 2, 4, 1]
-    checksum = 0
-
-    for i, char in enumerate(company_id):
-        product = int(char) * weights[i]
-        # 計算乘積的十位數與個位數相加
-        if product >= 10:
-            product = product // 10 + product % 10
-        checksum += product
-
-    # 符合下列任一條件則為有效統編：
-    # 1. 總和能被10整除
-    # 2. 第7位數字是7，而且總和加1後能被10整除
-    return checksum % 10 == 0 or (int(company_id[6]) == 7 and (checksum + 1) % 10 == 0)
 
 
 def main():
@@ -868,42 +878,141 @@ def main():
     import argparse
     import random
 
+    # 診斷環境
+    print_diagnostic_info()
+
     # 命令列參數
     p = argparse.ArgumentParser(description="爬取公司基本資料與實績級距")
     p.add_argument("company_ids", nargs="*", help="要爬取的統一編號列表")
     p.add_argument("--output", "-o", default="downloads", help="輸出目錄")
     p.add_argument("--no-db", action="store_true", help="不保存到資料庫")
     p.add_argument("--batch", "-b", action="store_true", help="批次處理預設公司列表")
+    p.add_argument("--limit", "-l", type=int, default=None, help="限制處理公司數量")
     args = p.parse_args()
 
-    if args.batch:
+    companies_to_query = [
+        "22178368",  # 微星科技
+        "22099131",  # 台灣積體電路製造股份有限公司
+        "84149961",  # 聯發科
+        "22555003",  # 統一超商
+        "04351626",  # 光泉牧場
+        "11768704",  # 義美
+        "71620635",  # 可果美
+        "03707901",  # 中油
+        "73008303",  # 大成長城
+    ]
+    
+    logging.info(f"命令列參數: {args}")
+    
+    # 檢測腳本名稱參數
+    if args.company_ids and (
+        any("py" in id.lower() for id in args.company_ids) or
+        any("." in id for id in args.company_ids)
+    ):
+        logging.warning(f"檢測到疑似腳本名稱的參數: {args.company_ids}，將使用預設公司列表")
+        args.company_ids = []
+
+    # 決定要處理的公司
+    if args.batch or not args.company_ids:
         # 使用內建公司列表進行批次處理
         logging.info(f"使用預設公司列表進行批次處理")
-        batch_process(COMPANY_IDS, args.output, not args.no_db)
+        # 根據參數限制公司數量
+        companies_to_process = companies_to_query[:args.limit] if args.limit else companies_to_query
+        logging.info(f"將處理 {len(companies_to_process)} 家公司")
+        batch_process(companies_to_process, args.output, not args.no_db)
+
+    
+    # 處理公司資料
+    results = {}
+    if len(companies_to_process) > 1:
+        results = batch_process(companies_to_process, args.output, not args.no_db)
     else:
-        # 使用用戶提供的統一編號
-        ids = args.company_ids
-        if not ids:
-            ids = COMPANY_IDS
+        single_result = extract_company_data(companies_to_process[0], args.output, not args.no_db)
+        results = {companies_to_process[0]: single_result}
+    
+    # 報告結果
+    logging.info("處理結果摘要:")
+    for company_id, result in results.items():
+        status = result.get("status", "unknown")
+        basic_count = len(result.get("basic", {}))
+        grades_count = len(result.get("grades", []))
+        logging.info(f"公司 {company_id}: 狀態={status}, 基本資料={basic_count}項, 級距資料={grades_count}筆")
+    
+    return results
 
-        # 驗證統一編號
-        valid_ids = []
-        for cid in ids:
-            if verify_company_id(cid):
-                valid_ids.append(cid)
-            else:
-                logging.warning(f"統一編號 {cid} 格式不正確或未通過驗證，將被跳過")
 
-        if valid_ids:
-            if len(valid_ids) > 1:
-                batch_process(valid_ids, args.output, not args.no_db)
-            else:
-                extract_company_data(valid_ids[0], args.output, not args.no_db)
+def print_diagnostic_info():
+    """打印診斷信息用於調試"""
+    logging.info("=== 環境診斷信息 ===")
+    logging.info(f"Python 版本: {sys.version}")
+    logging.info(f"當前目錄: {os.getcwd()}")
+    logging.info(f"環境變數:")
+    for key in ["POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_DB", "POSTGRES_USER", "DISPLAY"]:
+        logging.info(f"  {key}: {os.environ.get(key, '未設置')}")
+    
+    # 檢查 Chrome 路徑
+    chrome_paths = [
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/opt/google/chrome/chrome"
+    ]
+    for path in chrome_paths:
+        if os.path.exists(path):
+            logging.info(f"找到 Chrome 瀏覽器: {path}")
+            try:
+                version = os.popen(f"{path} --version").read().strip()
+                logging.info(f"Chrome 版本: {version}")
+            except:
+                logging.warning(f"無法獲取 Chrome 版本")
+            break
+    else:
+        logging.warning(f"未找到 Chrome 瀏覽器")
+    
+    # 檢查 ChromeDriver 路徑
+    driver_paths = [
+        "/usr/local/bin/chromedriver",
+        "/usr/bin/chromedriver"
+    ]
+    for path in driver_paths:
+        if os.path.exists(path):
+            logging.info(f"找到 ChromeDriver: {path}")
+            try:
+                version = os.popen(f"{path} --version").read().strip()
+                logging.info(f"ChromeDriver 版本: {version}")
+            except:
+                logging.warning(f"無法獲取 ChromeDriver 版本")
+            break
+    else:
+        logging.warning(f"未找到 ChromeDriver")
+    
+    # 檢查 Xvfb
+    try:
+        xvfb_process = os.popen("ps -ef | grep Xvfb").read()
+        if "Xvfb :99" in xvfb_process:
+            # 修正：使用字符串的 split 方法並傳入字面量 '\n'，而不是在 f-string 中使用 '\n'
+            first_line = xvfb_process.split('\n')[0]
+            logging.info(f"Xvfb 正在運行: {first_line}")
         else:
-            logging.error("沒有有效的統一編號可處理")
+            logging.warning(f"未檢測到 Xvfb 運行")
+    except:
+        logging.warning("無法檢查 Xvfb 狀態")
+
 
 
 if __name__ == "__main__":
+    # 定義全域 COMPANY_IDS 以便在 Jupyter 中使用
+    COMPANY_IDS = [
+        "22178368", # 微星科技
+        "22099131", # 台灣積體電路製造股份有限公司
+        "84149961", # 聯發科
+        "22555003", # 統一超商
+        "04351626", # 光泉牧場
+        "11768704", # 義美
+        "71620635", # 可果美
+        "03707901", # 中油
+        "73008303", # 大成長城
+    ]
+    
     if "ipykernel" in sys.modules:
         # 在 Jupyter Notebook 中執行
         logging.info("在 Notebook 中執行：爬取 COMPANY_IDS 中的第一個公司")

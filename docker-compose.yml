@@ -24,16 +24,19 @@ services:
       - POSTGRES_DB=company_data
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=1234 # 請更改為你的密碼
+      - DISPLAY=:99 # 確保 Xvfb 顯示環境變數設置正確
     volumes:
       - ./downloads:/app/downloads
+      - ./:/app # 添加當前目錄掛載，方便開發
     depends_on:
       - postgres
     networks:
       - app-network
+    ports:
+      - "8888:8888" # 為 Jupyter Lab 暴露埠號
 
 volumes:
   pgdata:
-
 
 networks:
   app-network:
